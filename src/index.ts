@@ -123,10 +123,13 @@ async function main(): Promise<void> {
           return
         }
 
-        console.log(`[http] GET /provider/${providerIdOrAddress}/pieces`)
+        const limit = Math.min(parseInt(url.searchParams.get("limit") || "100", 10), 1000)
+        const offset = parseInt(url.searchParams.get("offset") || "0", 10)
+
+        console.log(`[http] GET /provider/${providerIdOrAddress}/pieces?limit=${limit}&offset=${offset}`)
 
         try {
-          const pieces = await registry.getPiecesByProvider(providerIdOrAddress)
+          const result = await registry.getPiecesByProvider(providerIdOrAddress, limit, offset)
           const provider = registry.getProviders().find(
             (p) => String(p.id) === providerIdOrAddress || p.address.toLowerCase() === providerIdOrAddress.toLowerCase()
           )
@@ -139,8 +142,11 @@ async function main(): Promise<void> {
           res.end(JSON.stringify({
             provider: provider ? { id: provider.id, name: provider.name, address: provider.address, serviceURL: provider.serviceURL } : { query: providerIdOrAddress },
             network: NETWORK,
-            totalPieces: pieces.length,
-            pieces,
+            totalDataSets: result.totalDataSets,
+            count: result.pieces.length,
+            limit,
+            offset,
+            pieces: result.pieces,
           }))
         } catch (err: any) {
           console.error(`[http] Error fetching pieces:`, err.message)

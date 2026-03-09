@@ -144,8 +144,10 @@ export class ProviderRegistry {
    * Looks up by provider ID (from SP Registry) or address.
    */
   async getPiecesByProvider(
-    providerIdOrAddress: string
-  ): Promise<{ cid: string; rawSize: string; setId: string }[]> {
+    providerIdOrAddress: string,
+    limit = 100,
+    offset = 0
+  ): Promise<{ pieces: { cid: string; rawSize: string; setId: string }[]; totalDataSets: number }> {
     // Find the provider address
     let address: string
     const byId = this.providers.find(
@@ -171,52 +173,43 @@ export class ProviderRegistry {
     const dataSets: { setId: string; isActive: boolean }[] =
       dsData?.data?.dataSets || []
 
-    if (dataSets.length === 0) return []
+    const activeSets = dataSets.filter((ds) => ds.isActive)
+    if (activeSets.length === 0)
+      return { pieces: [], totalDataSets: 0 }
 
-    // 2. Get all active roots across those datasets
+    // 2. Get roots with pagination across all active datasets
+    // Query all datasets at once using OR, with skip/limit
+    const setIds = activeSets.map((ds) => `"${ds.setId}"`).join(",")
+    const rootResp = await fetch(subgraphURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `{ roots(first: ${limit}, skip: ${offset}, where: { setId_in: [${setIds}], removed: false }, orderBy: rootId) { cid rawSize setId } }`,
+      }),
+    })
+    const rootData = (await rootResp.json()) as any
+    const roots: { cid: string; rawSize: string; setId: string }[] =
+      rootData?.data?.roots || []
+
     const pieces: { cid: string; rawSize: string; setId: string }[] = []
-    for (const ds of dataSets) {
-      if (!ds.isActive) continue
-
-      let skip = 0
-      const batchSize = 1000
-      while (true) {
-        const rootResp = await fetch(subgraphURL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: `{ roots(first: ${batchSize}, skip: ${skip}, where: { setId: "${ds.setId}", removed: false }) { cid rawSize setId } }`,
-          }),
+    for (const root of roots) {
+      try {
+        const hex = root.cid.startsWith("0x")
+          ? root.cid.slice(2)
+          : root.cid
+        const bytes = Uint8Array.from(Buffer.from(hex, "hex"))
+        const decoded = CID.decode(bytes)
+        pieces.push({
+          cid: decoded.toString(),
+          rawSize: root.rawSize,
+          setId: root.setId,
         })
-        const rootData = (await rootResp.json()) as any
-        const roots: { cid: string; rawSize: string; setId: string }[] =
-          rootData?.data?.roots || []
-
-        for (const root of roots) {
-          try {
-            const hex = root.cid.startsWith("0x")
-              ? root.cid.slice(2)
-              : root.cid
-            const bytes = Uint8Array.from(
-              Buffer.from(hex, "hex")
-            )
-            const decoded = CID.decode(bytes)
-            pieces.push({
-              cid: decoded.toString(),
-              rawSize: root.rawSize,
-              setId: root.setId,
-            })
-          } catch {
-            // Skip malformed CIDs
-          }
-        }
-
-        if (roots.length < batchSize) break
-        skip += batchSize
+      } catch {
+        // Skip malformed CIDs
       }
     }
 
-    return pieces
+    return { pieces, totalDataSets: activeSets.length }
   }
 
   private async refresh(): Promise<void> {
