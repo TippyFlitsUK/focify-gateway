@@ -114,6 +114,42 @@ async function main(): Promise<void> {
         return
       }
 
+      // /provider/:id/pieces -- List all pieces stored by a provider
+      if (pathname.startsWith("/provider/") && pathname.endsWith("/pieces")) {
+        const providerIdOrAddress = pathname.slice(10, -7) // between "/provider/" and "/pieces"
+        if (!providerIdOrAddress) {
+          res.writeHead(400, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ error: "Missing provider ID or address" }))
+          return
+        }
+
+        console.log(`[http] GET /provider/${providerIdOrAddress}/pieces`)
+
+        try {
+          const pieces = await registry.getPiecesByProvider(providerIdOrAddress)
+          const provider = registry.getProviders().find(
+            (p) => String(p.id) === providerIdOrAddress || p.address.toLowerCase() === providerIdOrAddress.toLowerCase()
+          )
+
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=300",
+          })
+          res.end(JSON.stringify({
+            provider: provider ? { id: provider.id, name: provider.name, address: provider.address, serviceURL: provider.serviceURL } : { query: providerIdOrAddress },
+            network: NETWORK,
+            totalPieces: pieces.length,
+            pieces,
+          }))
+        } catch (err: any) {
+          console.error(`[http] Error fetching pieces:`, err.message)
+          res.writeHead(502, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ error: `Failed to query subgraph: ${err.message}` }))
+        }
+        return
+      }
+
       // /health
       if (pathname === "/health") {
         const providers = registry.getProviders()
@@ -143,6 +179,7 @@ async function main(): Promise<void> {
             "  GET /ipfs/{CID}             -- Serve IPFS content",
             "  GET /ipfs/{CID}/path/file   -- Serve specific file",
             "  GET /routing/v1/providers/{CID} -- Delegated routing",
+            "  GET /provider/{id}/pieces   -- List pieces stored by a provider",
             "  GET /health                 -- Health check",
           ].join("\n")
         )

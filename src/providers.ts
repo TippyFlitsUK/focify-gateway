@@ -9,6 +9,7 @@
 
 import { createPublicClient, http, hexToString, type Hex } from "viem"
 import { filecoin } from "viem/chains"
+import { CID } from "multiformats/cid"
 
 // SP Registry contract address (discovered from FWSS contract on mainnet)
 const SP_REGISTRY_ADDRESSES = {
@@ -132,6 +133,90 @@ export class ProviderRegistry {
 
   getGatewayURLs(): string[] {
     return this.providers.map((p) => p.serviceURL).filter(Boolean)
+  }
+
+  getNetwork(): Network {
+    return this.network
+  }
+
+  /**
+   * Query the Goldsky subgraph for all pieces (roots) stored by a provider.
+   * Looks up by provider ID (from SP Registry) or address.
+   */
+  async getPiecesByProvider(
+    providerIdOrAddress: string
+  ): Promise<{ cid: string; rawSize: string; setId: string }[]> {
+    // Find the provider address
+    let address: string
+    const byId = this.providers.find(
+      (p) => String(p.id) === providerIdOrAddress
+    )
+    if (byId) {
+      address = byId.address.toLowerCase()
+    } else {
+      address = providerIdOrAddress.toLowerCase()
+    }
+
+    const subgraphURL = SUBGRAPH_URLS[this.network]
+
+    // 1. Get all datasets owned by this provider
+    const dsResp = await fetch(subgraphURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `{ dataSets(first: 1000, where: { owner: "${address}" }) { setId isActive } }`,
+      }),
+    })
+    const dsData = (await dsResp.json()) as any
+    const dataSets: { setId: string; isActive: boolean }[] =
+      dsData?.data?.dataSets || []
+
+    if (dataSets.length === 0) return []
+
+    // 2. Get all active roots across those datasets
+    const pieces: { cid: string; rawSize: string; setId: string }[] = []
+    for (const ds of dataSets) {
+      if (!ds.isActive) continue
+
+      let skip = 0
+      const batchSize = 1000
+      while (true) {
+        const rootResp = await fetch(subgraphURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: `{ roots(first: ${batchSize}, skip: ${skip}, where: { setId: "${ds.setId}", removed: false }) { cid rawSize setId } }`,
+          }),
+        })
+        const rootData = (await rootResp.json()) as any
+        const roots: { cid: string; rawSize: string; setId: string }[] =
+          rootData?.data?.roots || []
+
+        for (const root of roots) {
+          try {
+            const hex = root.cid.startsWith("0x")
+              ? root.cid.slice(2)
+              : root.cid
+            const bytes = Uint8Array.from(
+              Buffer.from(hex, "hex")
+            )
+            const decoded = CID.decode(bytes)
+            pieces.push({
+              cid: decoded.toString(),
+              rawSize: root.rawSize,
+              setId: root.setId,
+            })
+          } catch {
+            // Skip malformed CIDs
+          }
+        }
+
+        if (roots.length < batchSize) break
+        skip += batchSize
+      }
+    }
+
+    return pieces
   }
 
   private async refresh(): Promise<void> {
