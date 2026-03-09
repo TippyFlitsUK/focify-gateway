@@ -72,8 +72,12 @@ async function main(): Promise<void> {
           return
         }
 
-        console.log(`[http] GET /ipfs/${cidStr}/${path}`)
-        await gateway.serve(cidStr, path, res)
+        // Redirect to subdomain gateway so absolute paths work
+        const subdomain = `${cidStr}.ipfs.${GATEWAY_DOMAIN.split(":")[0]}`
+        const redirectURL = `https://${subdomain}/${path}`
+        console.log(`[http] Redirect /ipfs/${cidStr}/ -> ${subdomain}`)
+        res.writeHead(302, { Location: redirectURL })
+        res.end()
         return
       }
 
