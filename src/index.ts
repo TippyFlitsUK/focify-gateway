@@ -13,6 +13,7 @@ import { Gateway } from "./gateway.js"
 
 const PORT = parseInt(process.env.PORT || "8090", 10)
 const NETWORK = (process.env.NETWORK || "mainnet") as Network
+const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || "gateway.focify.me"
 
 async function main(): Promise<void> {
   console.log("=== focify-gateway ===")
@@ -32,8 +33,26 @@ async function main(): Promise<void> {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`)
     const pathname = url.pathname
+    const host = req.headers.host || ""
 
     try {
+      // Subdomain gateway: {CID}.ipfs.gateway.focify.me
+      const subdomainSuffix = `.ipfs.${GATEWAY_DOMAIN}`
+      if (host.endsWith(subdomainSuffix) || host.endsWith(subdomainSuffix.split(":")[0])) {
+        const cidStr = host.split(".ipfs.")[0]
+        const path = pathname === "/" ? "" : pathname.slice(1)
+
+        if (!cidStr) {
+          res.writeHead(400, { "Content-Type": "text/plain" })
+          res.end("Missing CID in subdomain")
+          return
+        }
+
+        console.log(`[http] GET ${cidStr}.ipfs.../${path}`)
+        await gateway.serve(cidStr, path, res)
+        return
+      }
+
       // /ipfs/:cid or /ipfs/:cid/path/to/file
       if (pathname.startsWith("/ipfs/")) {
         const rest = pathname.slice(6) // after "/ipfs/"
