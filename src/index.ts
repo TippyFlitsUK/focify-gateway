@@ -36,10 +36,11 @@ async function main(): Promise<void> {
     const host = req.headers.host || ""
 
     try {
-      // Subdomain gateway: {CID}.ipfs.gateway.focify.me
-      const subdomainSuffix = `.ipfs.${GATEWAY_DOMAIN}`
-      if (host.endsWith(subdomainSuffix) || host.endsWith(subdomainSuffix.split(":")[0])) {
-        const cidStr = host.split(".ipfs.")[0]
+      // Subdomain gateway: {CID}.gateway.focify.me
+      const hostName = host.split(":")[0]
+      const suffix = `.${GATEWAY_DOMAIN.split(":")[0]}`
+      if (hostName !== GATEWAY_DOMAIN.split(":")[0] && hostName.endsWith(suffix)) {
+        const cidStr = hostName.slice(0, -suffix.length)
         const path = pathname === "/" ? "" : pathname.slice(1)
 
         if (!cidStr) {
