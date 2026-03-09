@@ -253,6 +253,11 @@ export class Gateway {
       res.end(body)
     } catch (err: any) {
       console.error(`[gateway] Error serving ${cidStr}/${fullPath}:`, err.message)
+      // Invalidate cached route so next request re-probes
+      // (CID may not have been available yet when the route was created)
+      this.routes.delete(cidStr)
+      route.helia.stop().catch(() => {})
+      console.log(`[gateway] Evicted failed route for ${cidStr.slice(0, 16)}... (will re-probe on next request)`)
       res.writeHead(502, { "Content-Type": "text/plain" })
       res.end(`Failed to fetch content: ${err.message}`)
     }
