@@ -177,30 +177,30 @@ export class Gateway {
   }
 
   /**
-   * Fetch content for an IPFS path and write it to the HTTP response.
+   * Try to serve content. Returns true if content was found and served,
+   * false if not found on this network (caller can try another network).
+   * Writes error responses (400, 502) directly.
    */
-  async serve(
+  async tryServe(
     cidStr: string,
     path: string,
     res: {
       writeHead: (code: number, headers: Record<string, string>) => void
       end: (data?: Uint8Array | string) => void
     }
-  ): Promise<void> {
+  ): Promise<boolean> {
     let cid: CID
     try {
       cid = CID.parse(cidStr)
     } catch {
       res.writeHead(400, { "Content-Type": "text/plain" })
       res.end("Invalid CID")
-      return
+      return true // handled (bad request)
     }
 
     const route = await this.getRoute(cid)
     if (!route) {
-      res.writeHead(404, { "Content-Type": "text/plain" })
-      res.end("Content not found on any FOC provider")
-      return
+      return false // not found on this network, caller can try next
     }
 
     const fullPath = path || ""
@@ -251,15 +251,40 @@ export class Gateway {
         "X-FOC-Provider": route.gatewayURL,
       })
       res.end(body)
+      return true
     } catch (err: any) {
-      console.error(`[gateway] Error serving ${cidStr}/${fullPath}:`, err.message)
-      // Invalidate cached route so next request re-probes
-      // (CID may not have been available yet when the route was created)
+      const msg = err.message || ""
+      // "No link" / "not a directory" = file doesn't exist under this CID (real 404, keep route)
+      if (msg.includes("No link") || msg.includes("not a directory")) {
+        console.log(`[gateway] 404 ${cidStr.slice(0, 16)}.../${fullPath}`)
+        res.writeHead(404, { "Content-Type": "text/plain" })
+        res.end("File not found")
+        return true
+      }
+      // Block load failure = wrong network or transient error, evict and try next
+      console.error(`[gateway] Error serving ${cidStr}/${fullPath}:`, msg)
       this.routes.delete(cidStr)
       route.helia.stop().catch(() => {})
-      console.log(`[gateway] Evicted failed route for ${cidStr.slice(0, 16)}... (will re-probe on next request)`)
-      res.writeHead(502, { "Content-Type": "text/plain" })
-      res.end(`Failed to fetch content: ${err.message}`)
+      console.log(`[gateway] Evicted failed route for ${cidStr.slice(0, 16)}... (will try next network)`)
+      return false
+    }
+  }
+
+  /**
+   * Serve content or return 404/502. Legacy method for single-network use.
+   */
+  async serve(
+    cidStr: string,
+    path: string,
+    res: {
+      writeHead: (code: number, headers: Record<string, string>) => void
+      end: (data?: Uint8Array | string) => void
+    }
+  ): Promise<void> {
+    const served = await this.tryServe(cidStr, path, res)
+    if (!served) {
+      res.writeHead(404, { "Content-Type": "text/plain" })
+      res.end("Content not found on any FOC provider")
     }
   }
 

@@ -74,6 +74,10 @@ Environment variables:
 - `PORT` -- HTTP port (default: 8090)
 - `NETWORK` -- `mainnet` or `calibration` (default: mainnet)
 
+## Caching
+
+Route-per-CID: first request probes all SP gateways, pins CID to the first responder, caches for 30 minutes. On any serve error (e.g. "Failed to load block"), the cached route is evicted and the Helia instance stopped -- next request re-probes fresh. This prevents negative caching when a CID is requested before content is published.
+
 ## Stack
 
 - TypeScript, ES modules, Node.js

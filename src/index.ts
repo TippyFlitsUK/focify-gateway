@@ -15,24 +15,68 @@ import { Gateway } from "./gateway.js"
 
 const PORT = parseInt(process.env.PORT || "8090", 10)
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT || "443", 10)
-const NETWORK = (process.env.NETWORK || "mainnet") as Network
+const NETWORKS: Network[] = ["mainnet", "calibration"]
 const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || "gateway.focify.me"
 const TLS_CERT = process.env.TLS_CERT || "/etc/letsencrypt/live/gateway.focify.me/fullchain.pem"
 const TLS_KEY = process.env.TLS_KEY || "/etc/letsencrypt/live/gateway.focify.me/privkey.pem"
 
 async function main(): Promise<void> {
   console.log("=== focify-gateway ===")
-  console.log(`Network: ${NETWORK}`)
-  console.log(`Port:    ${PORT}`)
+  console.log(`Networks: ${NETWORKS.join(", ")}`)
+  console.log(`Port:     ${PORT}`)
   console.log("")
 
-  // 1. Discover providers
-  const registry = new ProviderRegistry(NETWORK)
-  await registry.start()
+  // 1. Discover providers on both networks
+  const registries = new Map<Network, ProviderRegistry>()
+  const gateways = new Map<Network, Gateway>()
 
-  // 2. Start gateway
-  const gateway = new Gateway(registry)
-  await gateway.start()
+  for (const network of NETWORKS) {
+    const registry = new ProviderRegistry(network)
+    await registry.start()
+    registries.set(network, registry)
+
+    const gw = new Gateway(registry)
+    await gw.start()
+    gateways.set(network, gw)
+    console.log(`[${network}] Ready`)
+  }
+
+  // Default registry/gateway for routing and pieces endpoints
+  const registry = registries.get("mainnet")!
+  const gateway = gateways.get("mainnet")!
+
+  // CID -> network cache: remember which network successfully served a CID
+  const cidNetworkCache = new Map<string, Network>()
+
+  // Try cached network first, then all networks in order
+  async function serveWithFallback(
+    cidStr: string,
+    path: string,
+    res: import("node:http").ServerResponse
+  ): Promise<void> {
+    // Try cached network first
+    const cached = cidNetworkCache.get(cidStr)
+    if (cached) {
+      const gw = gateways.get(cached)!
+      const served = await gw.tryServe(cidStr, path, res)
+      if (served) return
+      // Cache miss (route evicted or content gone) -- clear and fall through
+      cidNetworkCache.delete(cidStr)
+    }
+
+    // Try all networks in order
+    for (const network of NETWORKS) {
+      if (network === cached) continue // already tried
+      const gw = gateways.get(network)!
+      const served = await gw.tryServe(cidStr, path, res)
+      if (served) {
+        cidNetworkCache.set(cidStr, network)
+        return
+      }
+    }
+    res.writeHead(404, { "Content-Type": "text/plain" })
+    res.end("Content not found on any FOC provider (mainnet + calibration)")
+  }
 
   // 3. HTTP server
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -55,7 +99,7 @@ async function main(): Promise<void> {
         }
 
         console.log(`[http] GET ${cidStr}.ipfs.../${path}`)
-        await gateway.serve(cidStr, path, res)
+        await serveWithFallback(cidStr, path, res)
         return
       }
 
@@ -73,11 +117,19 @@ async function main(): Promise<void> {
         }
 
         // Redirect to subdomain gateway so absolute paths work
-        const subdomain = `${cidStr}.ipfs.${GATEWAY_DOMAIN.split(":")[0]}`
-        const redirectURL = `https://${subdomain}/${path}`
-        console.log(`[http] Redirect /ipfs/${cidStr}/ -> ${subdomain}`)
-        res.writeHead(302, { Location: redirectURL })
-        res.end()
+        // Unless CID exceeds 63-char DNS label limit
+        if (cidStr.length <= 63) {
+          const subdomain = `${cidStr}.ipfs.${GATEWAY_DOMAIN.split(":")[0]}`
+          const redirectURL = `https://${subdomain}/${path}`
+          console.log(`[http] Redirect /ipfs/${cidStr.slice(0, 16)}.../ -> subdomain`)
+          res.writeHead(302, { Location: redirectURL })
+          res.end()
+          return
+        }
+
+        // Long CID: serve directly from path (subdomain would break DNS)
+        console.log(`[http] GET /ipfs/${cidStr.slice(0, 16)}.../${path}`)
+        await serveWithFallback(cidStr, path, res)
         return
       }
 
@@ -141,7 +193,7 @@ async function main(): Promise<void> {
           })
           res.end(JSON.stringify({
             provider: provider ? { id: provider.id, name: provider.name, address: provider.address, serviceURL: provider.serviceURL } : { query: providerIdOrAddress },
-            network: NETWORK,
+            network: "mainnet",
             totalDataSets: result.totalDataSets,
             count: result.pieces.length,
             limit,
@@ -158,28 +210,25 @@ async function main(): Promise<void> {
 
       // /health
       if (pathname === "/health") {
-        const providers = registry.getProviders()
+        const health: Record<string, unknown> = { status: "ok" }
+        for (const [network, reg] of registries) {
+          health[network] = { providers: reg.getProviders().length, gatewayURLs: reg.getGatewayURLs() }
+        }
         res.writeHead(200, { "Content-Type": "application/json" })
-        res.end(
-          JSON.stringify({
-            status: "ok",
-            network: NETWORK,
-            providers: providers.length,
-            gatewayURLs: registry.getGatewayURLs(),
-          })
-        )
+        res.end(JSON.stringify(health))
         return
       }
 
       // Root
       if (pathname === "/") {
-        const providers = registry.getProviders()
+        const lines = ["focify-gateway"]
+        for (const [network, reg] of registries) {
+          lines.push(`${network}: ${reg.getProviders().length} providers`)
+        }
         res.writeHead(200, { "Content-Type": "text/plain" })
         res.end(
           [
-            "focify-gateway",
-            `Network: ${NETWORK}`,
-            `Providers: ${providers.length}`,
+            ...lines,
             "",
             "Usage:",
             "  GET /ipfs/{CID}             -- Serve IPFS content",
@@ -219,8 +268,8 @@ async function main(): Promise<void> {
     // Graceful shutdown includes HTTPS
     const shutdown = async () => {
       console.log("\n[shutdown] Stopping...")
-      registry.stop()
-      await gateway.stop()
+      for (const reg of registries.values()) reg.stop()
+      for (const gw of gateways.values()) await gw.stop()
       server.close()
       httpsServer.close()
       process.exit(0)
@@ -231,8 +280,8 @@ async function main(): Promise<void> {
     console.log(`[https] TLS not available (${err.message}), HTTP only`)
     const shutdown = async () => {
       console.log("\n[shutdown] Stopping...")
-      registry.stop()
-      await gateway.stop()
+      for (const reg of registries.values()) reg.stop()
+      for (const gw of gateways.values()) await gw.stop()
       server.close()
       process.exit(0)
     }
