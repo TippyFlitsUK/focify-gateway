@@ -8,12 +8,17 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
+import { createServer as createHTTPSServer } from "node:https"
+import { readFileSync } from "node:fs"
 import { ProviderRegistry, type Network } from "./providers.js"
 import { Gateway } from "./gateway.js"
 
 const PORT = parseInt(process.env.PORT || "8090", 10)
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT || "443", 10)
 const NETWORK = (process.env.NETWORK || "mainnet") as Network
 const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || "gateway.focify.me"
+const TLS_CERT = process.env.TLS_CERT || "/etc/letsencrypt/live/gateway.focify.me/fullchain.pem"
+const TLS_KEY = process.env.TLS_KEY || "/etc/letsencrypt/live/gateway.focify.me/privkey.pem"
 
 async function main(): Promise<void> {
   console.log("=== focify-gateway ===")
@@ -36,11 +41,11 @@ async function main(): Promise<void> {
     const host = req.headers.host || ""
 
     try {
-      // Subdomain gateway: {CID}.gateway.focify.me
+      // Subdomain gateway: {CID}.ipfs.gateway.focify.me
       const hostName = host.split(":")[0]
-      const suffix = `.${GATEWAY_DOMAIN.split(":")[0]}`
-      if (hostName !== GATEWAY_DOMAIN.split(":")[0] && hostName.endsWith(suffix)) {
-        const cidStr = hostName.slice(0, -suffix.length)
+      const ipfsSuffix = `.ipfs.${GATEWAY_DOMAIN.split(":")[0]}`
+      if (hostName.endsWith(ipfsSuffix)) {
+        const cidStr = hostName.slice(0, -ipfsSuffix.length)
         const path = pathname === "/" ? "" : pathname.slice(1)
 
         if (!cidStr) {
@@ -151,21 +156,42 @@ async function main(): Promise<void> {
   })
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`\n[http] Listening on http://0.0.0.0:${PORT}`)
-    console.log(`[http] Try: http://localhost:${PORT}/health`)
+    console.log(`[http] Listening on http://0.0.0.0:${PORT}`)
   })
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    console.log("\n[shutdown] Stopping...")
-    registry.stop()
-    await gateway.stop()
-    server.close()
-    process.exit(0)
+  // HTTPS server with Let's Encrypt cert
+  try {
+    const tlsOpts = {
+      cert: readFileSync(TLS_CERT),
+      key: readFileSync(TLS_KEY),
+    }
+    const httpsServer = createHTTPSServer(tlsOpts, server.listeners("request")[0] as any)
+    httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
+      console.log(`[https] Listening on https://0.0.0.0:${HTTPS_PORT}`)
+    })
+    // Graceful shutdown includes HTTPS
+    const shutdown = async () => {
+      console.log("\n[shutdown] Stopping...")
+      registry.stop()
+      await gateway.stop()
+      server.close()
+      httpsServer.close()
+      process.exit(0)
+    }
+    process.on("SIGINT", shutdown)
+    process.on("SIGTERM", shutdown)
+  } catch (err: any) {
+    console.log(`[https] TLS not available (${err.message}), HTTP only`)
+    const shutdown = async () => {
+      console.log("\n[shutdown] Stopping...")
+      registry.stop()
+      await gateway.stop()
+      server.close()
+      process.exit(0)
+    }
+    process.on("SIGINT", shutdown)
+    process.on("SIGTERM", shutdown)
   }
-
-  process.on("SIGINT", shutdown)
-  process.on("SIGTERM", shutdown)
 }
 
 main().catch((err) => {
